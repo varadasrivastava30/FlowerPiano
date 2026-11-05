@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flower piano</title>
+<style>
+  :root { --ink:#fff3e6; --dim:#e6d2f0; --gold:#ffd98a; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:#1c1b4e; color:var(--ink);
+    font-family:"Avenir Next","Trebuchet MS",system-ui,sans-serif; overflow:hidden; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+  video { position:fixed; left:0; top:0; width:2px; height:2px; opacity:.01; pointer-events:none; }
+  #intro { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; text-align:center; padding:24px; gap:18px;
+    background:radial-gradient(ellipse at center, rgba(30,16,70,.15), rgba(20,10,50,.55)); }
+  #intro h1 { font-family:"Snell Roundhand","Apple Chancery","Lucida Calligraphy","Brush Script MT",cursive;
+    font-size:clamp(56px,11vw,128px); margin:0; font-weight:400; line-height:1;
+    background:linear-gradient(180deg,#fff7d6,#ffc9e6 70%,#d7b8ff); -webkit-background-clip:text; background-clip:text;
+    color:transparent; filter:drop-shadow(0 0 18px rgba(255,190,230,.55)); }
+  #intro .byline { margin-top:-8px; font-size:clamp(18px,2.4vw,26px); letter-spacing:.08em; color:#ffe9a8;
+    font-family:"Snell Roundhand","Apple Chancery","Lucida Calligraphy","Brush Script MT",cursive;
+    text-shadow:0 0 14px rgba(255,200,230,.6); }
+  #intro p { max-width:40ch; margin:0; color:var(--dim); font-size:19px; line-height:1.6; }
+  button { font:inherit; font-weight:600; font-size:18px; padding:14px 34px; border-radius:999px; cursor:pointer;
+    color:#3a1450; background:linear-gradient(135deg,#ffe9a8,#ffb3dd); border:0;
+    box-shadow:0 0 28px rgba(255,200,230,.55); }
+  button:hover { filter:brightness(1.07); }
+  button:focus-visible { outline:3px solid #fff; outline-offset:3px; }
+  #err { max-width:46ch; font-size:15px; line-height:1.55; color:#ffd7d2; background:rgba(120,20,40,.55);
+    padding:10px 14px; border-radius:10px; }
+  #err:empty { display:none; }
+  #status { position:fixed; left:16px; bottom:14px; font-size:14px; color:#fff; line-height:1.5; max-width:80vw;
+    text-shadow:0 1px 6px rgba(30,10,60,.8); transition:opacity 1.2s; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted autoplay></video>
+
+<div id="intro">
+  <h1>Flower piano</h1>
+  <div class="byline">by Varada</div>
+  <p>Touch the flowers with your fingertips. Each one blooms, sings, and scatters fairy dust. Close both fists to fold them into buds, and open both palms for pixie dust. Smile, and the sun comes up.</p>
+  <button id="start">Start camera</button>
+  <div id="err" role="alert"></div>
+</div>
+<div id="status" class="hidden"></div>
+
+<script type="module">
+import { HandLandmarker, FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const VERSION = "0.10.14";
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const video = document.getElementById('v');
+const statusEl = document.getElementById('status');
+const errEl = document.getElementById('err');
+let W, H, dpr, showVideo = true, showDebug = false;
+
+const TAU = Math.PI * 2;
+const GOLD = '255,214,130', PINK = '255,160,215', LILAC = '196,170,255', ICE = '170,236,255';
+const pick = a => a[Math.floor(Math.random() * a.length)];
+function rng(seed) {
+  return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+/* ---------- Flower garden: a different bloom for each note ---------- */
+const FLOWERS = [
+  { note:523.25,  spark:'255,120,190', stem:'#2f8a5c', size:1.00, dy:-0.03,
+    layers:[{ n:8, len:1.0, wid:0.27, off:Math.PI/8, shape:'notch', col:'#b3125d' },
+            { n:8, len:0.94, wid:0.27, off:0, shape:'notch', col:'#e6358a', vein:true }],
+    center:{ r:0.17, col:'#ffd23f', dot:'#fff3a8', dots:12 } },
+  { note:587.33,  spark:'255,170,200', stem:'#3b9a6a', size:0.92, dy:0.04,
+    layers:[{ n:5, len:1.0, wid:0.46, off:0, shape:'round', col:'#f79dbd' },
+            { n:5, len:0.82, wid:0.40, off:0.63, shape:'round', col:'#fbbcd3' },
+            { n:5, len:0.56, wid:0.32, off:0.3, shape:'round', col:'#fddbe6', vein:true }],
+    center:{ r:0.15, col:'#ffd23f', dot:'#ffb02e', dots:10 } },
+  { note:659.25,  spark:'140,190,255', stem:'#2c7f70', size:0.88, dy:0.0,
+    layers:[{ n:15, len:0.98, wid:0.12, off:0, shape:'spike', col:'#6f9fe8' },
+            { n:15, len:0.78, wid:0.12, off:0.2, shape:'spike', col:'#92b8f3' },
+            { n:10, len:0.46, wid:0.11, off:0.1, shape:'spike', col:'#5a86d8' }],
+    center:{ r:0.09, col:'#3f5fb8', dot:'#c9dcff', dots:8 } },
+  { note:783.99,  spark:'255,240,170', stem:'#4aa860', size:1.05, dy:0.05,
+    layers:[{ n:15, len:1.0, wid:0.11, off:0, shape:'round', col:'#e9eefb' },
+            { n:15, len:0.9, wid:0.11, off:0.21, shape:'round', col:'#ffffff' }],
+    center:{ r:0.27, col:'#ffc531', dot:'#e59a12', dots:14 } },
+  { note:880.00,  spark:'255,90,160', stem:'#2b7a5a', size:1.02, dy:-0.04,
+    layers:[{ n:13, len:1.0, wid:0.17, off:0, shape:'pointed', col:'#c2185b' },
+            { n:13, len:0.8, wid:0.17, off:0.24, shape:'pointed', col:'#ee3f86' },
+            { n:10, len:0.54, wid:0.15, off:0.1, shape:'pointed', col:'#ff7fae' }],
+    center:{ r:0.12, col:'#ffa31a', dot:'#ffe08a', dots:10 } },
+  { note:1046.50, spark:'255,170,90', stem:'#3a9d6a', size:0.86, dy:0.03,
+    layers:[{ n:13, len:1.0, wid:0.17, off:0, shape:'pointed', col:'#f26a12' },
+            { n:13, len:0.8, wid:0.17, off:0.24, shape:'pointed', col:'#ff9440' },
+            { n:10, len:0.54, wid:0.15, off:0.1, shape:'pointed', col:'#ffc277' }],
+    center:{ r:0.12, col:'#ffd23f', dot:'#fff0a0', dots:10 } },
+  { note:1174.66, spark:'200,170,255', stem:'#2f7f6f', size:0.96, dy:-0.01,
+    layers:[{ n:5, len:1.0, wid:0.5, off:0, shape:'round', col:'#b09af0' },
+            { n:5, len:0.62, wid:0.36, off:0.31, shape:'round', col:'#d6c9fa', vein:true }],
+    center:{ r:0.13, col:'#ff6fa8', dot:'#fff0f6', dots:9 } }
+];
+const LEANS  = [0.18, -0.10, 0.05, 0.12, -0.16, 0.14, -0.12];
+const CURVES = [0.25, -0.2, 0.1, -0.25, 0.2, -0.15, 0.22];
+FLOWERS.forEach((f, i) => Object.assign(f, { i, x:0, headY:0, R:50, b:0.2, closed:0, pulse:0, kick:0, kickV:0, hold:0, touching:false, lastTrig:0 }));
+
+let grassBack = [], grassFront = [], blossoms = [], fireflies = [], stars = [];
+const GRASS = ['#1f7a55', '#2f8f5a', '#3fae6b', '#5cc47d'];
+
+function layout() {
+  const rand = rng(11), n = FLOWERS.length;
+  FLOWERS.forEach((f, i) => {
+    f.x = W * (i + 0.5) / n;
+    f.R = Math.min(W / n * 0.52, H * 0.12) * f.size;
+    f.headY = H * (0.745 + f.dy);
+  });
+  grassBack = []; grassFront = []; blossoms = [];
+  for (let x = -10; x < W + 10; x += 10 + rand() * 6)
+    grassBack.push({ x:x + rand() * 8, h:H * (0.07 + rand() * 0.10), lean:(rand() - 0.5) * 46, w:2.5 + rand() * 2.5, c:GRASS[Math.floor(rand() * 4)], ph:rand() * 6 });
+  for (let x = -10; x < W + 10; x += 9 + rand() * 6)
+    grassFront.push({ x:x + rand() * 8, h:H * (0.025 + rand() * 0.05), lean:(rand() - 0.5) * 30, w:3 + rand() * 3, c:GRASS[Math.floor(rand() * 4)], ph:rand() * 6 });
+  const bc = ['#ff8fc0', '#ffffff', '#ffd23f', '#c9b3ff', '#ff6aa0', '#9fc4ff'];
+  for (let i = 0, c = Math.round(W / 55); i < c; i++)
+    blossoms.push({ x:rand() * W, h:H * (0.07 + rand() * 0.10), r:6 + rand() * 8, c:bc[Math.floor(rand() * bc.length)], ph:rand() * 6 });
+  stars = [];
+  for (let i = 0; i < 70; i++) stars.push({ x:rand() * W, y:rand() * H * 0.62, ph:rand() * 6, s:0.8 + rand() * 1.8 });
+  if (!fireflies.length)
+    for (let i = 0; i < 38; i++)
+      fireflies.push({ x:Math.random() * W, y:Math.random() * H, vx:(Math.random() - 0.5) * 0.25, vy:-0.05 - Math.random() * 0.25,
+        ph:Math.random() * 6, size:1.2 + Math.random() * 2.4, c:Math.random() < 0.6 ? GOLD : PINK });
+}
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  layout();
+}
+addEventListener('resize', resize); resize();
+addEventListener('keydown', e => {
+  if (e.key === 'v' || e.key === 'V') showVideo = !showVideo;
+  if (e.key === 'd' || e.key === 'D') showDebug = !showDebug;
+  if (e.key === 's' || e.key === 'S') manualSmile = !manualSmile;
+});
+
+/* ---------- Sound: glockenspiel notes plus a shimmer of fairy chimes ---------- */
+let actx = null, master = null, echoIn = null;
+function initAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  actx = new AC();
+  if (actx.state === 'suspended') actx.resume();
+  master = actx.createGain(); master.gain.value = 0.85; master.connect(actx.destination);
+  echoIn = actx.createGain();
+  const delay = actx.createDelay(1); delay.delayTime.value = 0.27;
+  const fb = actx.createGain(); fb.gain.value = 0.38;
+  const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2600;
+  echoIn.connect(delay); delay.connect(lp); lp.connect(fb); fb.connect(delay); lp.connect(master);
+}
+function route(node, send) {
+  node.connect(master);
+  const s = actx.createGain(); s.gain.value = send; node.connect(s); s.connect(echoIn);
+}
+function playNote(freq) {
+  if (!actx) return;
+  const t = actx.currentTime, g = actx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.28, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0008, t + 2.2);
+  route(g, 0.45);
+  [['triangle', 1, 1], ['sine', 2, 0.3], ['sine', 4, 0.12]].forEach(([type, mul, vol]) => {
+    const o = actx.createOscillator(), og = actx.createGain();
+    o.type = type; o.frequency.value = freq * mul; og.gain.value = vol;
+    o.connect(og); og.connect(g); o.start(t); o.stop(t + 2.3);
+  });
+}
+function playSparkle() {
+  if (!actx) return;
+  const t = actx.currentTime, scale = [1568, 1760, 2093, 2349, 2637, 3136];
+  const n = 5 + Math.floor(Math.random() * 4);
+  for (let i = 0; i < n; i++) {
+    const at = t + 0.03 + i * (0.035 + Math.random() * 0.055);
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine'; o.frequency.value = pick(scale) * (Math.random() < 0.2 ? 2 : 1);
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(0.055 + Math.random() * 0.03, at + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0004, at + 0.45 + Math.random() * 0.4);
+    o.connect(g); route(g, 0.6); o.start(at); o.stop(at + 1);
+  }
+}
+function playSunrise() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  [392, 523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((fq, i) => {
+    const at = t + i * 0.22;
+    [['triangle', 1, 1], ['sine', 2, 0.25]].forEach(([type, mul, vol]) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = type; o.frequency.value = fq * mul;
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.linearRampToValueAtTime(0.11 * vol, at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0005, at + 1.8);
+      o.connect(g); route(g, 0.55); o.start(at); o.stop(at + 1.9);
+    });
+  });
+}
+function playNightfall() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  [1046.5, 880, 659.25, 523.25, 392].forEach((fq, i) => {
+    const at = t + i * 0.32, o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine'; o.frequency.value = fq;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(0.08, at + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0004, at + 2.0);
+    o.connect(g); route(g, 0.6); o.start(at); o.stop(at + 2.1);
+  });
+}
+function playHush() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  [[784, 0], [587.33, 0.09], [392, 0.2]].forEach(([fq, d]) => {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine'; o.frequency.value = fq;
+    g.gain.setValueAtTime(0.0001, t + d);
+    g.gain.linearRampToValueAtTime(0.1, t + d + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0005, t + d + 1.1);
+    o.connect(g); route(g, 0.5); o.start(t + d); o.stop(t + d + 1.2);
+  });
+}
+function playPixieDust() {
+  if (!actx) return;
+  const t = actx.currentTime, scale = [1568, 1760, 2093, 2349, 2637, 3136, 3520, 4186];
+  for (let i = 0; i < 20; i++) {
+    const at = t + i * (0.03 + Math.random() * 0.04);
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine'; o.frequency.value = scale[Math.min(scale.length - 1, Math.floor(i / 2.5))] * (Math.random() < 0.12 ? 2 : 1);
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(0.05 + Math.random() * 0.035, at + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0004, at + 0.5 + Math.random() * 0.6);
+    o.connect(g); route(g, 0.7); o.start(at); o.stop(at + 1.3);
+  }
+  const len = Math.floor(actx.sampleRate * 1.2), buf = actx.createBuffer(1, len, actx.sampleRate), data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 7000; bp.Q.value = 0.7;
+  const ng = actx.createGain();
+  ng.gain.setValueAtTime(0.0001, t);
+  ng.gain.linearRampToValueAtTime(0.05, t + 0.25);
+  ng.gain.exponentialRampToValueAtTime(0.0005, t + 1.2);
+  src.connect(bp); bp.connect(ng); route(ng, 0.5); src.start(t);
+}
+
+/* ---------- Fairy dust ---------- */
+let particles = [], rings = [];
+function burst(f, x, y) {
+  const cols = [f.spark, GOLD, GOLD, PINK, LILAC, ICE];
+  for (let i = 0; i < 34; i++) {
+    const a = Math.random() * TAU, sp = 0.6 + Math.random() * 3.2;
+    particles.push({ k:'dust', x, y, vx:Math.cos(a) * sp, vy:Math.sin(a) * sp - 0.6, life:1, decay:0.005 + Math.random() * 0.008,
+      size:1 + Math.random() * 2.2, c:pick(cols), ph:Math.random() * 6 });
+  }
+  for (let i = 0; i < 12; i++) {
+    const a = Math.random() * TAU, sp = 0.5 + Math.random() * 2.4;
+    particles.push({ k:'star', x, y, vx:Math.cos(a) * sp, vy:Math.sin(a) * sp - 0.7, life:1, decay:0.006 + Math.random() * 0.008,
+      size:5 + Math.random() * 9, c:pick([GOLD, GOLD, PINK, '255,255,255']), ph:Math.random() * 6 });
+  }
+  for (let i = 0; i < 5; i++) {
+    const a = Math.random() * TAU, sp = 0.3 + Math.random() * 1.2;
+    particles.push({ k:'bokeh', x, y, vx:Math.cos(a) * sp, vy:Math.sin(a) * sp - 0.4, life:1, decay:0.005 + Math.random() * 0.005,
+      size:8 + Math.random() * 14, c:pick([GOLD, PINK, LILAC]), ph:Math.random() * 6 });
+  }
+  rings.push({ x, y, r:f.R * 0.5, life:1, c:f.spark });
+  if (particles.length > 1400) particles.splice(0, particles.length - 1400);
+}
+function pixieBurst(x, y) {
+  const cols = [GOLD, GOLD, PINK, LILAC, ICE, '255,255,255'];
+  for (let i = 0; i < 90; i++) {
+    const a = Math.random() * TAU, sp = 0.8 + Math.random() * 4.2;
+    particles.push({ k:'dust', x, y, vx:Math.cos(a) * sp, vy:Math.sin(a) * sp - 1.0, life:1, decay:0.004 + Math.random() * 0.007,
+      size:1 + Math.random() * 2.4, c:pick(cols), ph:Math.random() * 6 });
+  }
+  for (let i = 0; i < 28; i++) {
+    const a = Math.random() * TAU, sp = 0.6 + Math.random() * 3.4;
+    particles.push({ k:'star', x, y, vx:Math.cos(a) * sp, vy:Math.sin(a) * sp - 1.0, life:1, decay:0.005 + Math.random() * 0.008,
+      size:5 + Math.random() * 10, c:pick([GOLD, PINK, '255,255,255']), ph:Math.random() * 6 });
+  }
+  for (let i = 0; i < 8; i++) {
+    const a = Math.random() * TAU, sp = 0.3 + Math.random() * 1.6;
+    particles.push({ k:'bokeh', x, y, vx:Math.cos(a) * sp, vy:Math.sin(a) * sp - 0.5, life:1, decay:0.004 + Math.random() * 0.005,
+      size:8 + Math.random() * 16, c:pick([GOLD, PINK, LILAC]), ph:Math.random() * 6 });
+  }
+  rings.push({ x, y, r:20, life:1, c:GOLD }, { x, y, r:6, life:1, c:PINK });
+  if (particles.length > 1400) particles.splice(0, particles.length - 1400);
+}
+function pixieStream(x, y) {
+  for (let i = 0; i < 2; i++)
+    particles.push({ k:'dust', x:x + (Math.random() - 0.5) * 50, y:y + (Math.random() - 0.5) * 50, vx:(Math.random() - 0.5) * 1.6,
+      vy:-0.4 - Math.random() * 1.4, life:1, decay:0.008 + Math.random() * 0.01, size:1 + Math.random() * 2,
+      c:pick([GOLD, PINK, LILAC, ICE, '255,255,255']), ph:Math.random() * 6 });
+  if (Math.random() < 0.3)
+    particles.push({ k:'star', x:x + (Math.random() - 0.5) * 50, y:y + (Math.random() - 0.5) * 50, vx:(Math.random() - 0.5) * 1.2,
+      vy:-0.3 - Math.random() * 1.0, life:1, decay:0.01 + Math.random() * 0.01, size:4 + Math.random() * 8, c:pick([GOLD, PINK, '255,255,255']), ph:Math.random() * 6 });
+  if (particles.length > 1400) particles.splice(0, particles.length - 1400);
+}
+function trailDust(x, y) {
+  particles.push({ k:Math.random() < 0.25 ? 'star' : 'dust', x:x + (Math.random() - 0.5) * 8, y:y + (Math.random() - 0.5) * 8,
+    vx:(Math.random() - 0.5) * 0.6, vy:-0.1 - Math.random() * 0.5, life:1, decay:0.014 + Math.random() * 0.012,
+    size:Math.random() < 0.25 ? 4 + Math.random() * 5 : 1 + Math.random() * 1.8, c:pick([GOLD, PINK, LILAC, '255,255,255']), ph:Math.random() * 6 });
+}
+function starPath(x, y, s) {
+  const k = s * 0.14;
+  ctx.beginPath();
+  ctx.moveTo(x, y - s);
+  ctx.quadraticCurveTo(x + k, y - k, x + s, y);
+  ctx.quadraticCurveTo(x + k, y + k, x, y + s);
+  ctx.quadraticCurveTo(x - k, y + k, x - s, y);
+  ctx.quadraticCurveTo(x - k, y - k, x, y - s);
+  ctx.fill();
+}
+function drawParticles(t) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  particles = particles.filter(p => p.life > 0);
+  for (const p of particles) {
+    p.x += p.vx + Math.sin(p.y * 0.03 + p.ph) * 0.25;
+    p.y += p.vy;
+    p.vx *= 0.985; p.vy = p.vy * 0.985 - 0.006;
+    p.life -= p.decay;
+    const tw = 0.65 + 0.35 * Math.sin(t * 12 + p.ph);
+    const a = Math.max(p.life, 0);
+    if (p.k === 'dust') {
+      ctx.fillStyle = `rgba(${p.c},${a * tw})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, TAU); ctx.fill();
+    } else if (p.k === 'star') {
+      ctx.fillStyle = `rgba(${p.c},${a * tw})`;
+      starPath(p.x, p.y, p.size * (0.5 + 0.5 * a));
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size * 0.18, 0, TAU); ctx.fill();
+    } else {
+      ctx.strokeStyle = `rgba(${p.c},${a * 0.35})`; ctx.fillStyle = `rgba(${p.c},${a * 0.10})`; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, TAU); ctx.fill(); ctx.stroke();
+    }
+  }
+  rings = rings.filter(r => r.life > 0);
+  for (const r of rings) {
+    r.r += 3.2; r.life -= 0.022;
+    ctx.strokeStyle = `rgba(${r.c},${Math.max(r.life, 0) * 0.55})`; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, TAU); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* ---------- Drawing ---------- */
+function petalShape(shape, len, wid) {
+  ctx.beginPath(); ctx.moveTo(0, 0);
+  if (shape === 'round') {
+    ctx.bezierCurveTo(wid * 1.7, -len * 0.1, wid * 1.5, -len * 1.15, 0, -len);
+    ctx.bezierCurveTo(-wid * 1.5, -len * 1.15, -wid * 1.7, -len * 0.1, 0, 0);
+  } else if (shape === 'notch') {
+    ctx.bezierCurveTo(wid * 1.5, -len * 0.15, wid * 1.3, -len * 0.95, wid * 0.45, -len);
+    ctx.lineTo(0, -len * 0.9); ctx.lineTo(-wid * 0.45, -len);
+    ctx.bezierCurveTo(-wid * 1.3, -len * 0.95, -wid * 1.5, -len * 0.15, 0, 0);
+  } else if (shape === 'spike') {
+    ctx.bezierCurveTo(wid * 0.9, -len * 0.35, wid * 0.55, -len * 0.9, 0, -len);
+    ctx.bezierCurveTo(-wid * 0.55, -len * 0.9, -wid * 0.9, -len * 0.35, 0, 0);
+  } else {
+    ctx.bezierCurveTo(wid * 1.2, -len * 0.3, wid * 0.8, -len * 0.82, 0, -len);
+    ctx.bezierCurveTo(-wid * 0.8, -len * 0.82, -wid * 1.2, -len * 0.3, 0, 0);
+  }
+  ctx.fill();
+}
+
+function headPos(f, t) {
+  return { x:f.x + Math.sin(t * 1.1 + f.i * 1.3) * f.R * 0.05 + f.kick, y:f.headY + Math.sin(t * 0.9 + f.i) * 2 };
+}
+
+function drawStem(f, hx, hy) {
+  const bx = f.x - LEANS[f.i] * f.R * 1.2, by = H + 24;
+  const cx = (bx + hx) / 2 + CURVES[f.i] * f.R * 0.8, cy = (by + hy) / 2;
+  ctx.lineCap = 'round'; ctx.strokeStyle = f.stem;
+  ctx.lineWidth = Math.max(4, f.R * 0.12);
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.quadraticCurveTo(cx, cy, hx, hy); ctx.stroke();
+  [[0.45, 1], [0.7, -1]].forEach(([u, side]) => {
+    const px = (1 - u) ** 2 * bx + 2 * u * (1 - u) * cx + u * u * hx;
+    const py = (1 - u) ** 2 * by + 2 * u * (1 - u) * cy + u * u * hy;
+    const dx = 2 * (1 - u) * (cx - bx) + 2 * u * (hx - cx), dy = 2 * (1 - u) * (cy - by) + 2 * u * (hy - cy);
+    const L = f.R * 0.55;
+    ctx.save(); ctx.translate(px, py); ctx.rotate(Math.atan2(dy, dx) + side * 0.85);
+    ctx.fillStyle = '#6fcf8a';
+    ctx.beginPath(); ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(L * 0.3, -L * 0.38, L * 0.8, -L * 0.3, L, 0);
+    ctx.bezierCurveTo(L * 0.8, L * 0.3, L * 0.3, L * 0.38, 0, 0); ctx.fill();
+    ctx.restore();
+  });
+}
+
+function drawHead(f, x, y, t) {
+  const R = f.R * (1 + 0.18 * f.pulse);
+  ctx.save(); ctx.translate(x, y);
+  const glow = ctx.createRadialGradient(0, 0, R * 0.2, 0, 0, R * 2.3);
+  glow.addColorStop(0, `rgba(${f.spark},${(0.10 + 0.40 * f.b) * (1 - 0.7 * f.closed) * (1 - 0.5 * daylight)})`);
+  glow.addColorStop(1, `rgba(${f.spark},0)`);
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 0, R * 2.3, 0, TAU); ctx.fill();
+  ctx.rotate(Math.sin(t * 0.6 + f.i) * 0.08 + f.pulse * 0.4);
+  f.layers.forEach((L, li) => {
+    const cl = f.closed;
+    const len = R * L.len * ((0.42 + 0.58 * f.b) * (1 - cl) + 0.72 * cl);
+    const wid = R * L.wid * ((0.6 + 0.4 * f.b) * (1 - cl) + 0.85 * cl);
+    if (li === 0) { ctx.shadowColor = 'rgba(40,10,70,.28)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3; }
+    else { ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0; }
+    ctx.fillStyle = L.col;
+    for (let i = 0; i < L.n; i++) {
+      ctx.save();
+      let ang = (i / L.n + L.off / TAU) % 1; if (ang > 0.5) ang -= 1;
+      ctx.rotate(ang * TAU * (1 - 0.82 * cl) + (li % 2 ? 1 : -1) * f.b * 0.12 * (1 - cl));
+      petalShape(L.shape, len, wid);
+      if (L.vein) {
+        ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, -len * 0.12); ctx.lineTo(0, -len * 0.7); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  });
+  ctx.shadowColor = 'transparent';
+  const c = f.center, cr = R * c.r;
+  ctx.globalAlpha = 1 - f.closed;
+  ctx.fillStyle = c.col; ctx.beginPath(); ctx.arc(0, 0, cr, 0, TAU); ctx.fill();
+  ctx.fillStyle = c.dot;
+  for (let i = 0; i < c.dots; i++) {
+    const a = i / c.dots * TAU + t * 0.2, rr = cr * (0.45 + 0.4 * (i % 2));
+    ctx.beginPath(); ctx.arc(Math.cos(a) * rr, Math.sin(a) * rr, Math.max(1.4, R * 0.028), 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawGrass(list, t, alpha) {
+  ctx.lineCap = 'round'; ctx.globalAlpha = alpha;
+  for (const g of list) {
+    const sway = Math.sin(t * 1.2 + g.ph + g.x * 0.01) * 6;
+    ctx.strokeStyle = g.c; ctx.lineWidth = g.w;
+    ctx.beginPath(); ctx.moveTo(g.x, H + 4);
+    ctx.quadraticCurveTo(g.x + g.lean * 0.4 + sway * 0.4, H - g.h * 0.55, g.x + g.lean + sway, H - g.h); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawBlossoms(t) {
+  for (const b of blossoms) {
+    const sway = Math.sin(t * 1.1 + b.ph) * 5, tx = b.x + sway, ty = H - b.h;
+    ctx.strokeStyle = '#2f8f5a'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(b.x, H + 4); ctx.quadraticCurveTo(b.x + sway * 0.3, H - b.h * 0.5, tx, ty); ctx.stroke();
+    ctx.fillStyle = b.c;
+    for (let i = 0; i < 6; i++) {
+      const a = i / 6 * TAU;
+      ctx.beginPath(); ctx.arc(tx + Math.cos(a) * b.r * 0.62, ty + Math.sin(a) * b.r * 0.62, b.r * 0.5, 0, TAU); ctx.fill();
+    }
+    ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.arc(tx, ty, b.r * 0.38, 0, TAU); ctx.fill();
+  }
+}
+function drawFireflies(t) {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const f of fireflies) {
+    f.x += f.vx + Math.sin(t * 0.5 + f.ph) * 0.15; f.y += f.vy;
+    if (f.y < -10) { f.y = H + 10; f.x = Math.random() * W; }
+    if (f.x < -10) f.x = W + 10; if (f.x > W + 10) f.x = -10;
+    const a = (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * 1.6 + f.ph))) * (1 - daylight * 0.9);
+    ctx.fillStyle = `rgba(${f.c},${a * 0.18})`; ctx.beginPath(); ctx.arc(f.x, f.y, f.size * 4, 0, TAU); ctx.fill();
+    ctx.fillStyle = `rgba(${f.c},${a * 0.9})`; ctx.beginPath(); ctx.arc(f.x, f.y, f.size, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+const mix = (a, b, k) => a + (b - a) * k;
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const rgbMix = (a, b, k) => `rgb(${mix(a[0], b[0], k) | 0},${mix(a[1], b[1], k) | 0},${mix(a[2], b[2], k) | 0})`;
+const rgbaMix = (a, b, k) => `rgba(${mix(a[0], b[0], k) | 0},${mix(a[1], b[1], k) | 0},${mix(a[2], b[2], k) | 0},${mix(a[3], b[3], k).toFixed(3)})`;
+
+function drawStars(t, vis) {
+  if (vis < 0.02) return;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  stars.forEach((st, i) => {
+    const a = vis * (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * 1.8 + st.ph)));
+    ctx.fillStyle = `rgba(255,244,214,${a})`;
+    if (i % 6 === 0) starPath(st.x, st.y, st.s * 4);
+    else { ctx.beginPath(); ctx.arc(st.x, st.y, st.s * 0.8, 0, TAU); ctx.fill(); }
+  });
+  ctx.restore();
+}
+function drawMoon(x, y, r, vis) {
+  if (vis < 0.02) return;
+  ctx.save(); ctx.globalAlpha = vis;
+  const g = ctx.createRadialGradient(x, y, r * 0.6, x, y, r * 4);
+  g.addColorStop(0, 'rgba(255,244,205,.35)'); g.addColorStop(1, 'rgba(255,244,205,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r * 4, 0, TAU); ctx.fill();
+  const d = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+  d.addColorStop(0, '#fffbe8'); d.addColorStop(1, '#eadfbd');
+  ctx.fillStyle = d; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(200,188,150,.45)';
+  [[-0.3, -0.1, 0.22], [0.25, 0.25, 0.16], [0.2, -0.35, 0.12]].forEach(([dx, dy, rr]) => {
+    ctx.beginPath(); ctx.arc(x + dx * r, y + dy * r, rr * r, 0, TAU); ctx.fill();
+  });
+  ctx.restore();
+}
+function drawSun(x, y, r, warm, t) {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  const gc = [255, mix(236, 140, warm) | 0, mix(170, 60, warm) | 0];
+  const g = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 7);
+  g.addColorStop(0, `rgba(${gc},0.42)`); g.addColorStop(1, `rgba(${gc},0)`);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r * 7, 0, TAU); ctx.fill();
+  ctx.translate(x, y); ctx.rotate(t * 0.06);
+  ctx.fillStyle = `rgba(255,${210 - warm * 70 | 0},${140 - warm * 60 | 0},0.10)`;
+  for (let i = 0; i < 14; i++) {
+    ctx.rotate(TAU / 14);
+    ctx.beginPath(); ctx.moveTo(-r * 0.18, r * 1.2); ctx.lineTo(0, r * 3.4 + Math.sin(t * 1.5 + i) * r * 0.25); ctx.lineTo(r * 0.18, r * 1.2); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  const d = ctx.createRadialGradient(x - r * 0.2, y - r * 0.2, r * 0.1, x, y, r);
+  d.addColorStop(0, '#fffdf0'); d.addColorStop(1, warm > 0.4 ? '#ffb057' : '#ffd96a');
+  ctx.fillStyle = d; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+}
+
+function trigger(f, hx, hy, now) {
+  f.lastTrig = now; f.pulse = 1; f.hold = 1.8;
+  f.kickV = (Math.random() < 0.5 ? -1 : 1) * (4 + Math.random() * 3);
+  playNote(f.note); playSparkle(); burst(f, hx, hy);
+}
+
+/* ---------- Hand ---------- */
+const CONN = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const TIPS = [4, 8, 12, 16, 20];
+
+/* Smile and sun tuning. */
+const SMILE_ON = 0.40, SMILE_OFF = 0.25;   // average of the two mouth-smile scores (0 to 1)
+const DAY_SECONDS = 50;                    // how long one sun trip across the sky takes
+let faceLm = null, faceResult = null, lastFaceTime = -1, faceTick = 0;
+let smileScore = 0, smilingDet = false, manualSmile = false, sunT = 0, daylight = 0;
+
+/* Gesture tuning. Press D to see the live numbers and adjust these. */
+const FIST_ENTER = 0.90, FIST_EXIT = 1.05;   // longest finger reach: below ENTER = fist
+const OPEN_ENTER = 0.95, OPEN_EXIT = 0.82;   // shortest finger reach: above ENTER = open palm
+
+function handMetrics(lm, vw, vh) {
+  const P = i => ({ x:lm[i].x * vw, y:lm[i].y * vh });
+  let cx = 0, cy = 0;
+  [0, 5, 9, 13, 17].forEach(i => { cx += lm[i].x; cy += lm[i].y; });
+  cx /= 5; cy /= 5;
+  const w = P(0), m = P(9), size = Math.hypot(w.x - m.x, w.y - m.y) || 1;
+  const d = TIPS.map(i => { const p = P(i); return Math.hypot(p.x - cx * vw, p.y - cy * vh) / size; });
+  const fingers = d.slice(1);
+  return { cx, cy, d, maxF:Math.max(...fingers), minF:Math.min(...fingers) };
+}
+
+function drawDebug(info, fistActive, bothOpen) {
+  const lines = ['fps ' + fps.toFixed(0), 'hands detected: ' + info.length,
+    'closed-bud mode (both fists): ' + (fistActive ? 'ON' : 'off') + '    pixie dust (both palms open): ' + (bothOpen ? 'ON' : 'off')];
+  info.forEach((h, i) => {
+    const d = h.m.d;
+    lines.push('');
+    lines.push(`hand ${i + 1}: ${h.s.fist ? 'FIST' : h.s.open ? 'OPEN PALM' : 'partly open'}`);
+    lines.push(`  reach  thumb ${d[0].toFixed(2)}  index ${d[1].toFixed(2)}  middle ${d[2].toFixed(2)}  ring ${d[3].toFixed(2)}  pinky ${d[4].toFixed(2)}`);
+    lines.push(`  longest finger ${h.m.maxF.toFixed(2)} (fist below ${FIST_ENTER})   shortest ${h.m.minF.toFixed(2)} (open above ${OPEN_ENTER})`);
+  });
+  lines.push('', 'bloom  ' + FLOWERS.map(f => f.b.toFixed(2)).join('  '));
+  lines.push(`smile ${smileScore.toFixed(2)} (on above ${SMILE_ON}, off below ${SMILE_OFF})   smiling: ${smilingDet ? 'YES' : 'no'}${manualSmile ? '   (S test is on)' : ''}`);
+  lines.push(`sun progress ${sunT.toFixed(2)}   daylight ${daylight.toFixed(2)}   face tracking: ${faceLm ? 'on' : 'unavailable'}`);
+  ctx.save();
+  ctx.font = '13px ui-monospace, Menlo, monospace';
+  const w = Math.min(W - 24, Math.max(...lines.map(l => ctx.measureText(l).width)) + 24);
+  ctx.fillStyle = 'rgba(15,8,40,.72)'; ctx.fillRect(12, 12, w, lines.length * 18 + 16);
+  ctx.fillStyle = '#fff3e6';
+  lines.forEach((l, i) => ctx.fillText(l, 24, 34 + i * 18));
+  info.forEach((h, i) => {
+    const label = `${i + 1}: ${h.s.fist ? 'fist' : h.s.open ? 'open' : 'partial'} ${h.m.maxF.toFixed(2)}`;
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(15,8,40,.72)'; ctx.fillRect(h.px - tw / 2 - 6, h.py - 30, tw + 12, 22);
+    ctx.fillStyle = '#ffe9a8'; ctx.fillText(label, h.px - tw / 2, h.py - 14);
+  });
+  ctx.restore();
+}
+function drawHand(pts) {
+  ctx.save();
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,175,225,.9)'; ctx.shadowColor = 'rgba(255,140,210,.9)'; ctx.shadowBlur = 8;
+  ctx.beginPath(); CONN.forEach(([a, b]) => { ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y); }); ctx.stroke();
+  pts.forEach((p, i) => {
+    const tip = TIPS.includes(i);
+    ctx.fillStyle = tip ? '#fff2b8' : 'rgba(255,255,255,.9)';
+    ctx.beginPath(); ctx.arc(p.x, p.y, tip ? 6 : 3, 0, TAU); ctx.fill();
+  });
+  ctx.restore();
+}
+
+/* ---------- Start-up ---------- */
+let landmarker = null, running = false, lastVideoTime = -1, lastResult = null;
+async function makeFaceLandmarker() {
+  const fileset = await FilesetResolver.forVisionTasks(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VERSION}/wasm`);
+  const modelAssetPath = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+  for (const delegate of ['GPU', 'CPU']) {
+    try { return await FaceLandmarker.createFromOptions(fileset, { baseOptions:{ modelAssetPath, delegate }, runningMode:'VIDEO', numFaces:1, outputFaceBlendshapes:true }); }
+    catch (e) { console.warn('Face tracking failed with', delegate, e); }
+  }
+  throw new Error('Face tracking could not load.');
+}
+async function makeLandmarker() {
+  const fileset = await FilesetResolver.forVisionTasks(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VERSION}/wasm`);
+  const modelAssetPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+  for (const delegate of ['GPU', 'CPU']) {
+    try { return await HandLandmarker.createFromOptions(fileset, { baseOptions:{ modelAssetPath, delegate }, runningMode:'VIDEO', numHands:2 }); }
+    catch (e) { console.warn('Hand tracking failed with', delegate, e); }
+  }
+  throw new Error('Hand tracking could not load. Check your internet connection.');
+}
+document.getElementById('start').addEventListener('click', async () => {
+  errEl.textContent = '';
+  initAudio();
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw Object.assign(new Error('no camera api'), { name:'NoMediaDevices' });
+    statusEl.classList.remove('hidden'); statusEl.style.opacity = 1; statusEl.textContent = 'Starting camera.';
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:{ ideal:1280 }, height:{ ideal:720 }, facingMode:'user' }, audio:false });
+    video.srcObject = stream; await video.play();
+    document.getElementById('intro').classList.add('hidden');
+    statusEl.textContent = 'Loading hand tracking.';
+    landmarker = await makeLandmarker();
+    statusEl.textContent = 'Loading smile detection.';
+    try { faceLm = await makeFaceLandmarker(); } catch (e) { console.warn(e); faceLm = null; }
+    statusEl.innerHTML = 'Touch a flower with your fingertip. Close both fists to fold the flowers into buds. Open both palms for pixie dust. Smile to bring up the sun.<br>Press D for tracking numbers, V to hide the camera image, and S to test the sunrise.'
+      + (faceLm ? '' : '<br>Smile detection could not load, so press S to test the sunrise instead.');
+    running = true;
+    setTimeout(() => { statusEl.style.opacity = 0; }, 16000);
+  } catch (e) {
+    document.getElementById('intro').classList.remove('hidden');
+    statusEl.classList.add('hidden');
+    errEl.textContent = (e.name === 'NotAllowedError' || e.name === 'NoMediaDevices' || e.name === 'SecurityError')
+      ? 'The camera is blocked for this page. Allow it in your browser settings, then reload.'
+      : 'Could not start: ' + (e.message || e);
+  }
+});
+
+/* ---------- Main loop ---------- */
+let prevMs = 0, prevFist = false, prevBothOpen = false, lastPixie = 0, fps = 60;
+const handState = [];
+const lastTip = new Map();
+canvas.addEventListener('pointerdown', ev => {
+  const now = performance.now();
+  FLOWERS.forEach(f => { const h = headPos(f, now / 1000); if (Math.hypot(ev.clientX - h.x, ev.clientY - h.y) < f.R * 1.1) trigger(f, h.x, h.y, now); });
+});
+
+function frame(ms) {
+  const t = ms / 1000, dt = Math.min((ms - prevMs) / 1000, 0.05); prevMs = ms;
+  if (dt > 0) fps += (1 / dt - fps) * 0.1;
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s, ox = (W - dw) / 2, oy = (H - dh) / 2;
+
+  /* Smile detection drives the sun. */
+  if (running && faceLm && video.readyState >= 2 && video.currentTime !== lastFaceTime) {
+    lastFaceTime = video.currentTime;
+    if ((faceTick++ & 1) === 0) { try { faceResult = faceLm.detectForVideo(video, performance.now()); } catch (e) { /* skip bad frame */ } }
+  }
+  let rawSmile = 0;
+  const bs = faceResult && faceResult.faceBlendshapes && faceResult.faceBlendshapes[0];
+  if (bs) {
+    const g = n => { const c = bs.categories.find(x => x.categoryName === n); return c ? c.score : 0; };
+    rawSmile = (g('mouthSmileLeft') + g('mouthSmileRight')) / 2;
+  }
+  smileScore += (rawSmile - smileScore) * 0.35;
+  if (!smilingDet && smileScore > SMILE_ON) smilingDet = true; else if (smilingDet && smileScore < SMILE_OFF) smilingDet = false;
+  const smiling = smilingDet || manualSmile;
+  if (smiling && sunT === 0) { sunT = 0.0001; playSunrise(); }
+  if (sunT > 0) {
+    if (smiling && sunT > 0.4) sunT -= 0.05 * dt;                    // keep smiling and the sun stays up
+    else sunT += dt / DAY_SECONDS * (sunT < 0.18 ? 3 : 1);          // quick sunrise, slow trip across, slow sunset
+    if (sunT >= 1) { sunT = 0; playNightfall(); }
+  }
+  const elev = sunT > 0 ? Math.sin(Math.PI * sunT) : 0;
+  daylight += (clamp01(elev * 2.4) - daylight) * 0.05;
+  const warm = sunT > 0 ? clamp01(1 - elev / 0.45) : 0;
+  const sunX = W * (0.1 + 0.8 * sunT), sunY = H * 0.88 - elev * H * 0.76, sunR = Math.min(W, H) * 0.07;
+
+  const hasVideo = running && showVideo && video.readyState >= 2;
+  if (hasVideo) {
+    ctx.save(); ctx.translate(ox + dw, oy); ctx.scale(-1, 1); ctx.drawImage(video, 0, 0, dw, dh); ctx.restore();
+    const NT = [[30, 22, 95, .40], [90, 45, 140, .16], [255, 140, 200, .26]];
+    const DT = [[150, 205, 255, .10], [255, 255, 255, 0], [255, 230, 160, .14]];
+    const tint = ctx.createLinearGradient(0, 0, 0, H);
+    [0, 0.55, 1].forEach((pos, i) => tint.addColorStop(pos, rgbaMix(NT[i], DT[i], daylight)));
+    ctx.fillStyle = tint; ctx.fillRect(0, 0, W, H);
+    const vig = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+    vig.addColorStop(0, 'rgba(20,10,50,0)'); vig.addColorStop(1, `rgba(20,10,50,${mix(0.38, 0.12, daylight).toFixed(3)})`);
+    ctx.fillStyle = vig; ctx.fillRect(0, 0, W, H);
+  } else {
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, rgbMix([28, 27, 78], [110, 195, 255], daylight));
+    bg.addColorStop(0.55, rgbMix([75, 43, 124], [169, 222, 250], daylight));
+    bg.addColorStop(1, rgbMix([215, 127, 180], [255, 241, 201], daylight));
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  }
+  if (warm > 0) {
+    const wg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, Math.max(W, H) * 0.75);
+    wg.addColorStop(0, `rgba(255,150,90,${(0.34 * warm).toFixed(3)})`); wg.addColorStop(1, 'rgba(255,150,90,0)');
+    ctx.fillStyle = wg; ctx.fillRect(0, 0, W, H);
+  }
+  drawStars(t, 1 - daylight);
+  drawMoon(W * 0.1, H * 0.14, Math.min(W, H) * 0.045, (1 - daylight) * 0.9);
+  if (sunT > 0) {
+    drawSun(sunX, sunY, sunR, warm, t);
+    if (sunT < 0.18 && Math.random() < 0.5) pixieStream(sunX, sunY);
+  }
+
+  if (running && landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    try { lastResult = landmarker.detectForVideo(video, performance.now()); } catch (e) { /* skip bad frame */ }
+  }
+  const hands = (running && lastResult && lastResult.landmarks) ? lastResult.landmarks : [];
+  const handPts = hands.map(lm => lm.map(p => ({ x:ox + (1 - p.x) * dw, y:oy + p.y * dh })));
+  const info = hands.map((lm, hi) => {
+    const m = handMetrics(lm, vw, vh);
+    const s = handState[hi] || (handState[hi] = { fist:false, open:false, maxS:1.3, minS:1.3 });
+    s.maxS += (m.maxF - s.maxS) * 0.5; s.minS += (m.minF - s.minS) * 0.5;
+    if (!s.fist && s.maxS < FIST_ENTER) s.fist = true; else if (s.fist && s.maxS > FIST_EXIT) s.fist = false;
+    if (!s.open && s.minS > OPEN_ENTER) s.open = true; else if (s.open && s.minS < OPEN_EXIT) s.open = false;
+    return { m, s, px:ox + (1 - m.cx) * dw, py:oy + m.cy * dh };
+  });
+  for (let i = hands.length; i < handState.length; i++) handState[i] = null;
+  const fistActive = info.length >= 2 && info.every(h => h.s.fist);
+  const bothOpen = info.length >= 2 && info[0].s.open && info[1].s.open;
+  const nowG = performance.now();
+  if (fistActive && !prevFist) playHush();
+  prevFist = fistActive;
+  if (bothOpen) {
+    if (!prevBothOpen && nowG - lastPixie > 1200) {
+      info.slice(0, 2).forEach(h => pixieBurst(h.px, h.py));
+      playPixieDust(); lastPixie = nowG;
+    }
+    info.slice(0, 2).forEach(h => pixieStream(h.px, h.py));
+  }
+  prevBothOpen = bothOpen;
+
+  const tips = [];
+  handPts.forEach((pts, hi) => TIPS.forEach(i => {
+    const p = pts[i]; tips.push(p);
+    const key = hi + '-' + i, last = lastTip.get(key);
+    if (last && Math.hypot(p.x - last.x, p.y - last.y) > 4 && Math.random() < (i === 8 ? 0.9 : 0.35)) trailDust(p.x, p.y);
+    lastTip.set(key, { x:p.x, y:p.y });
+  }));
+
+  const now = performance.now();
+  FLOWERS.forEach(f => {
+    const h = headPos(f, t);
+    const touching = !fistActive && tips.some(p => Math.hypot(p.x - h.x, p.y - h.y) < f.R * 1.05);
+    if (touching && !f.touching && now - f.lastTrig > 180) trigger(f, h.x, h.y, now);
+    if (touching) f.hold = Math.max(f.hold, 1.0);
+    if (f.hold > 0.3 && Math.random() < 0.12) particles.push({ k:'dust', x:h.x + (Math.random() - 0.5) * f.R * 1.4, y:h.y + (Math.random() - 0.5) * f.R * 1.4,
+      vx:(Math.random() - 0.5) * 0.4, vy:-0.2 - Math.random() * 0.5, life:1, decay:0.01, size:1 + Math.random() * 1.6, c:pick([f.spark, GOLD]), ph:Math.random() * 6 });
+    f.touching = touching;
+    if (fistActive) f.hold = 0;
+    f.hold = Math.max(0, f.hold - dt);
+    f.closed += ((fistActive ? 1 : 0) - f.closed) * 0.12;
+    f.b += ((fistActive ? 0 : f.hold > 0 ? 1 : 0.2) - f.b) * 0.12;
+    f.pulse *= 0.9;
+    f.kickV += -f.kick * 0.08; f.kick += f.kickV; f.kickV *= 0.9;
+  });
+
+  drawFireflies(t);
+  drawGrass(grassBack, t, 0.95);
+  drawBlossoms(t);
+  FLOWERS.forEach(f => { const h = headPos(f, t); drawStem(f, h.x, h.y); });
+  FLOWERS.forEach(f => { const h = headPos(f, t); drawHead(f, h.x, h.y, t); });
+  drawGrass(grassFront, t, 1);
+  drawParticles(t);
+  handPts.forEach(drawHand);
+  if (showDebug) drawDebug(info, fistActive, bothOpen);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
